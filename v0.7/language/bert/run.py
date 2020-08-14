@@ -26,7 +26,7 @@ from squad_QSL import get_squad_QSL
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend", choices=["tf","pytorch","onnxruntime"], default="tf", help="Backend")
+    parser.add_argument("--backend", choices=["tf","pytorch","onnxruntime","tf_estimator"], default="tf", help="Backend")
     parser.add_argument("--scenario", choices=["SingleStream", "Offline", "Server", "MultiStream"], default="Offline", help="Scenario")
     parser.add_argument("--accuracy", action="store_true", help="enable accuracy pass")
     parser.add_argument("--quantized", action="store_true", help="use quantized model (only valid for onnxruntime backend)")
@@ -56,6 +56,11 @@ def main():
         assert not args.profile, "Profiling is only supported by onnxruntime backend!"
         from tf_SUT import get_tf_sut
         sut = get_tf_sut()
+    elif args.backend == "tf_estimator":
+        assert not args.quantized, "Quantized model is only supported by onnxruntime backend!"
+        assert not args.profile, "Profiling is only supported by onnxruntime backend!"
+        from tf_estimator_SUT import get_tf_estimator_sut
+        sut = get_tf_estimator_sut()
     elif args.backend == "onnxruntime":
         from onnxruntime_SUT import get_onnxruntime_sut
         sut = get_onnxruntime_sut(args)
@@ -85,7 +90,7 @@ def main():
     lg.StartTestWithLogSettings(sut.sut, sut.qsl.qsl, settings, log_settings)
 
     if args.accuracy:
-        cmd = "python3 squad_eval.py"
+        cmd = "python3 accuracy-squad.py"
         subprocess.check_call(cmd, shell=True)
 
     print("Done!")

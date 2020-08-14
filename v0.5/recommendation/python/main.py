@@ -36,7 +36,6 @@ log = logging.getLogger("main")
 
 NANO_SEC = 1e9
 MILLI_SEC = 1000
-QUERY_LEN_CAP = 2048
 
 # pylint: disable=missing-docstring
 
@@ -121,10 +120,12 @@ def get_args():
     # below will override mlperf rules compliant settings - don't use for official submission
     parser.add_argument("--duration", type=int, help="duration in milliseconds (ms)")
     parser.add_argument("--target-qps", type=int, help="target/expected qps")
+    parser.add_argument("--max-latency", type=float, help="mlperf max latency in pct tile")
     parser.add_argument("--count-samples", type=int, help="dataset items to use")
     parser.add_argument("--count-queries", type=int, help="number of queries to use")
-    parser.add_argument("--max-latency", type=float, help="mlperf max latency in pct tile")
-    parser.add_argument("--samples-per-query", type=int, help="mlperf multi-stream sample per query")
+    parser.add_argument("--samples-per-query-multistream", type=int, help="query length for multi-stream scenario (in terms of aggregated samples)")
+    # --samples-per-query-offline is equivalent to perf_sample_count
+    parser.add_argument("--samples-per-query-offline", type=int, default=2048, help="query length for offline scenario (in terms of aggregated samples)")
     parser.add_argument("--samples-to-aggregate-fix", type=int, help="number of samples to be treated as one")
     parser.add_argument("--samples-to-aggregate-min", type=int, help="min number of samples to be treated as one in random query size")
     parser.add_argument("--samples-to-aggregate-max", type=int, help="max number of samples to be treated as one in random query size")
@@ -203,13 +204,14 @@ def get_backend(backend, dataset, max_ind_range, data_sub_sample_rate, use_gpu):
 class Item:
     """An item that we queue for processing by the thread pool."""
 
-    def __init__(self, query_id, content_id, batch_dense_X, batch_lS_o, batch_lS_i, batch_T=None):
+    def __init__(self, query_id, content_id, batch_dense_X, batch_lS_o, batch_lS_i, batch_T=None, idx_offsets=None):
         self.query_id = query_id
         self.content_id = content_id
         self.batch_dense_X = batch_dense_X
         self.batch_lS_o = batch_lS_o
         self.batch_lS_i = batch_lS_i
         self.batch_T = batch_T
+        self.idx_offsets = idx_offsets
         self.start = time.time()
 
 class RunnerBase:
@@ -252,7 +254,11 @@ class RunnerBase:
                 # result = processed_results[idx][0] and target = processed_results[idx][1]
                 # also each idx might be a query of samples, rather than a single sample
                 # depending on the --samples-to-aggregate* arguments.
-                response_array = array.array("B", np.array(processed_results, np.float32).tobytes())
+                s_idx = qitem.idx_offsets[idx]
+                e_idx = qitem.idx_offsets[idx + 1]
+                # debug prints
+                # print("s,e:",s_idx,e_idx, len(processed_results))
+                response_array = array.array("B", np.array(processed_results[s_idx:e_idx], np.float32).tobytes())
                 response_array_refs.append(response_array)
                 bi = response_array.buffer_info()
                 response.append(lg.QuerySampleResponse(query_id, bi[0], bi[1]))
@@ -264,14 +270,14 @@ class RunnerBase:
         query_len = len(query_samples)
 
         if query_len < self.max_batchsize:
-            batch_dense_X, batch_lS_o, batch_lS_i, batch_T = self.ds.get_samples(idx)
-            self.run_one_item(Item(query_id, idx, batch_dense_X, batch_lS_o, batch_lS_i, batch_T))
+            batch_dense_X, batch_lS_o, batch_lS_i, batch_T, idx_offsets = self.ds.get_samples(idx)
+            self.run_one_item(Item(query_id, idx, batch_dense_X, batch_lS_o, batch_lS_i, batch_T, idx_offsets))
         else:
             bs = self.max_batchsize
             for i in range(0, query_len, bs):
                 ie = min(i + bs, query_len)
-                batch_dense_X, batch_lS_o, batch_lS_i, batch_T = self.ds.get_samples(idx[i:ie])
-                self.run_one_item(Item(query_id[i:ie], idx[i:ie], batch_dense_X, batch_lS_o, batch_lS_i, batch_T))
+                batch_dense_X, batch_lS_o, batch_lS_i, batch_T, idx_offsets = self.ds.get_samples(idx[i:ie])
+                self.run_one_item(Item(query_id[i:ie], idx[i:ie], batch_dense_X, batch_lS_o, batch_lS_i, batch_T, idx_offsets))
 
     def finish(self):
         pass
@@ -280,7 +286,7 @@ class RunnerBase:
 class QueueRunner(RunnerBase):
     def __init__(self, model, ds, threads, post_proc=None, max_batchsize=128):
         super().__init__(model, ds, threads, post_proc, max_batchsize)
-        queue_size_multiplier = 4 #(QUERY_LEN_CAP + max_batchsize - 1) // max_batchsize)
+        queue_size_multiplier = 4 #(args.samples_per_query_offline + max_batchsize - 1) // max_batchsize)
         self.tasks = Queue(maxsize=threads * queue_size_multiplier)
         self.workers = []
         self.result_dict = {}
@@ -308,14 +314,14 @@ class QueueRunner(RunnerBase):
         query_len = len(query_samples)
 
         if query_len < self.max_batchsize:
-            batch_dense_X, batch_lS_o, batch_lS_i, batch_T = self.ds.get_samples(idx)
-            self.tasks.put(Item(query_id, idx, batch_dense_X, batch_lS_o, batch_lS_i, batch_T))
+            batch_dense_X, batch_lS_o, batch_lS_i, batch_T, idx_offsets = self.ds.get_samples(idx)
+            self.tasks.put(Item(query_id, idx, batch_dense_X, batch_lS_o, batch_lS_i, batch_T, idx_offsets))
         else:
             bs = self.max_batchsize
             for i in range(0, query_len, bs):
                 ie = min(i + bs, query_len)
-                batch_dense_X, batch_lS_o, batch_lS_i, batch_T = self.ds.get_samples(idx[i:ie])
-                self.tasks.put(Item(query_id[i:ie], idx[i:ie], batch_dense_X, batch_lS_o, batch_lS_i, batch_T))
+                batch_dense_X, batch_lS_o, batch_lS_i, batch_T, idx_offsets = self.ds.get_samples(idx[i:ie])
+                self.tasks.put(Item(query_id[i:ie], idx[i:ie], batch_dense_X, batch_lS_o, batch_lS_i, batch_T, idx_offsets))
 
     def finish(self):
         # exit all threads
@@ -373,8 +379,7 @@ def main():
     # dataset to use
     wanted_dataset, pre_proc, post_proc, kwargs = SUPPORTED_DATASETS[args.dataset]
 
-    # --count-samples applies to accuracy mode only and can be used to limit the number
-    # of samples used for testing. For perf model we always cap count to QUERY_LEN_CAP.
+    # --count-samples can be used to limit the number of samples used for testing
     ds = wanted_dataset(data_path=args.dataset_path,
                         name=args.dataset,
                         pre_process=pre_proc,  # currently an identity function
@@ -417,7 +422,7 @@ def main():
     ds.load_query_samples([0])
 
     for _ in range(5):
-        batch_dense_X, batch_lS_o, batch_lS_i, batch_T = ds.get_samples([0])
+        batch_dense_X, batch_lS_o, batch_lS_i, _, _ = ds.get_samples([0])
         _ = backend.predict(batch_dense_X, batch_lS_o, batch_lS_i)
 
     ds.unload_query_samples(None)
@@ -466,15 +471,15 @@ def main():
         settings.min_query_count = args.count_queries
         settings.max_query_count = args.count_queries
 
-    if args.samples_per_query:
-        settings.multi_stream_samples_per_query = args.samples_per_query
+    if args.samples_per_query_multistream:
+        settings.multi_stream_samples_per_query = args.samples_per_query_multistream
 
     if args.max_latency:
         settings.server_target_latency_ns = int(args.max_latency * NANO_SEC)
         settings.multi_stream_target_latency_ns = int(args.max_latency * NANO_SEC)
 
     sut = lg.ConstructSUT(issue_queries, flush_queries, process_latencies)
-    qsl = lg.ConstructQSL(count, min(count, QUERY_LEN_CAP), ds.load_query_samples, ds.unload_query_samples)
+    qsl = lg.ConstructQSL(count, min(count, args.samples_per_query_offline), ds.load_query_samples, ds.unload_query_samples)
 
     log.info("starting {}".format(scenario))
     result_dict = {"good": 0, "total": 0, "roc_auc": 0, "scenario": str(scenario)}
