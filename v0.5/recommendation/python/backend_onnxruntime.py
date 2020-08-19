@@ -50,17 +50,29 @@ class BackendOnnxruntime(backend.Backend):
         return self
 
     def predict(self, batch_dense_X, batch_lS_o, batch_lS_i):
-        print("onnx predict")
+        #print("onnx predict")
         """Run the prediction."""
         
         dict_inputs = {}
-        dict_inputs[self.inputs[0]] = batch_dense_X.numpy().astype(np.float32)
-        dict_inputs[self.inputs[1]] = batch_lS_o.numpy().astype(np.int64)
-        dict_inputs[self.inputs[2]] = batch_lS_i.numpy().astype(np.int64)
+        # dict_inputs[self.inputs[0]] = batch_dense_X.numpy().astype(np.float32)
+        # dict_inputs[self.inputs[1]] = batch_lS_o.numpy().astype(np.int64)
+        # dict_inputs[self.inputs[2]] = batch_lS_i.numpy().astype(np.int64)
+
+        ind = 0
         
-        #return self.sess.run(output_names=self.outputs, input_feed=[{self.inputs[0]:batch_dense_X.numpy()}, {self.inputs[1]:batch_lS_o.numpy()}, {self.inputs[2]:batch_lS_i.numpy()}])
-        
+        for i in self.inputs:
+            
+            if "input.1" == i:
+                dict_inputs[i] = batch_dense_X.numpy().astype(np.float32)
+            
+            elif "lS_o" == i:
+                dict_inputs[i] = batch_lS_o.numpy().astype(np.int64)
+
+            else:
+                dict_inputs[i] = batch_lS_i[ind].numpy().astype(np.int64)
+                ind = ind + 1
+
         prediction = self.sess.run(output_names=self.outputs, input_feed=dict_inputs)
-        print("prediction", prediction)
+       # print("prediction", prediction)
         
         return torch.tensor(prediction, requires_grad=False).view(-1,1)
