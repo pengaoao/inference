@@ -34,24 +34,27 @@ class BackendOnnxruntime(backend.Backend):
         self.sess = rt.InferenceSession(model_path, opt)
         
         # get input and output names
-#        if inputs is None:
         self.inputs = [meta.name for meta in self.sess.get_inputs()]
-#        else:
-#            self.inputs = inputs
-        
-#        if outputs is None:
         self.outputs = [meta.name for meta in self.sess.get_outputs()]
-#        else:
-#            self.outputs = outputs
+        
+        self.overloads = [meta.name for meta in self.sess.get_overridable_initializers()] 
+        self.meta = self.sess.get_modelmeta() 
+        #self.prov_option = self.sess.get_provider_options()
         
         print("inputs", self.inputs)
         print("outputs", self.outputs)
+        print("overloads", self.overloads)
+        print("meta", self.meta)
+        #print("prov_option", self.prov_option)
+        
         #self.outputs = ["predict"]
         return self
 
     def predict(self, batch_dense_X, batch_lS_o, batch_lS_i):
-        #print("onnx predict")
+       
+#        print("onnx predict batch", batch_dense_X, '\n\n', batch_lS_o, '\n\n', batch_lS_i)
         """Run the prediction."""
+        print("batch_lS_i.shape", batch_lS_i.shape)
         
         dict_inputs = {}
         # dict_inputs[self.inputs[0]] = batch_dense_X.numpy().astype(np.float32)
@@ -59,18 +62,15 @@ class BackendOnnxruntime(backend.Backend):
         # dict_inputs[self.inputs[2]] = batch_lS_i.numpy().astype(np.int64)
 
         ind = 0
-        
         for i in self.inputs:
-            
-            if "input.1" == i:
+            if ind == 0:               # dense features
                 dict_inputs[i] = batch_dense_X.numpy().astype(np.float32)
-            
-            elif "lS_o" == i:
+            elif ind == 1:             # offsets
                 dict_inputs[i] = batch_lS_o.numpy().astype(np.int64)
+            else:                      # indices
+                dict_inputs[i] = batch_lS_i[ind-2].numpy().astype(np.int64)
 
-            else:
-                dict_inputs[i] = batch_lS_i[ind].numpy().astype(np.int64)
-                ind = ind + 1
+            ind = ind + 1
 
         prediction = self.sess.run(output_names=self.outputs, input_feed=dict_inputs)
        # print("prediction", prediction)
